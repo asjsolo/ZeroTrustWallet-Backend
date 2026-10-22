@@ -3,6 +3,8 @@ const router = express.Router();
 const { Op } = require('sequelize');
 const User = require('../models/User');
 const { evaluateKeystrokes } = require('../services/keystrokeEngine');
+const { evaluateGestures } = require('../services/gestureEngine');
+const { BiometricBaseline } = require('../models/BiometricBaseline')
 
 
 // POST /register
@@ -105,6 +107,8 @@ router.post('/enroll', async (req, res) => {
     console.log("Keystroke Baseline Engine Data:");
     // JSON.stringify formats the arrays nicely so they don't print as [Object]
     console.log(JSON.stringify(keystrokeBaseline, null, 2));
+    console.log("Gesture Baseline Engine Data (Swipes & Taps):"); // ADD THIS
+    console.log(JSON.stringify(gestureBaseline, null, 2));
     console.log("================================================\n");
 
     // THE LAZY-LOAD FIX: Require the model exactly when the route is triggered!
@@ -193,4 +197,44 @@ router.post('/verify-keystroke', async (req, res) => {
   }
 });
 
+router.post('/verify-gesture', async (req, res) => {
+  try {
+    const { userId, gestureBatch } = req.body;
+
+    if (!userId || !gestureBatch) {
+      return res.status(400).json({ error: "Missing required gesture payload." });
+    }
+
+    // 1. Fetch user's baseline from Neon PostgreSQL
+    const userBaseline = await BiometricBaseline.findOne({ where: { userId } });
+    if (!userBaseline || !userBaseline.gestureBaseline) {
+      return res.status(404).json({ error: "Gesture baseline not found." });
+    }
+
+    // 2. Run the statistical evaluation engine
+    const evaluation = evaluateGestures(userBaseline.gestureBaseline, gestureBatch);
+
+    // 3. Persist adaptive learning if the user is in the 75-79% zone
+    if (evaluation.action === "ADAPT" && evaluation.updatedBaseline) {
+      await BiometricBaseline.update(
+        { gestureBaseline: evaluation.updatedBaseline },
+        { where: { userId } }
+      );
+      console.log(`[ZeroTrust] User ${userId} gesture baseline adapted.`);
+    }
+
+    // 4. Return the trust score and action to the ZK Fusion Engine
+    res.status(200).json({
+      score: evaluation.score,
+      action: evaluation.action,
+      timestamp: Date.now()
+    });
+
+  } catch (error) {
+    console.error("Gesture Verification API Error:", error);
+    res.status(500).json({ error: "Internal server error during gesture verification." });
+  }
+});
+
 module.exports = router;
+
