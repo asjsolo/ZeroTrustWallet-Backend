@@ -4,7 +4,8 @@ const { Op } = require('sequelize');
 const User = require('../models/User');
 const { evaluateKeystrokes } = require('../services/keystrokeEngine');
 const { evaluateGestures } = require('../services/gestureEngine');
-const { BiometricBaseline } = require('../models/BiometricBaseline')
+const BiometricBaseline = require('../models/BiometricBaseline');
+const imuEngine = require('../services/imuEngine');
 
 
 // POST /register
@@ -107,7 +108,7 @@ router.post('/enroll', async (req, res) => {
     console.log("Keystroke Baseline Engine Data:");
     // JSON.stringify formats the arrays nicely so they don't print as [Object]
     console.log(JSON.stringify(keystrokeBaseline, null, 2));
-    console.log("Gesture Baseline Engine Data (Swipes & Taps):"); // ADD THIS
+    console.log("Gesture Baseline Engine Data (Swipes & Taps):");
     console.log(JSON.stringify(gestureBaseline, null, 2));
     console.log("================================================\n");
 
@@ -128,26 +129,24 @@ router.post('/enroll', async (req, res) => {
     }
 
     // 3. Upsert Baseline (Create or Update if re-training)
-    const [baselineRecord, created] = await BiometricBaseline.findOrCreate({
-      where: { userId },
-      defaults: {
-        userId,
-        keystrokeBaseline,
-        gestureBaseline,
-        imuBaseline,
-        isEnrolled: true
-      }
-    });
+    const [baselineRecord] = await BiometricBaseline.upsert({
+      userId,
+      keystrokeBaseline,
+      gestureBaseline,
+      imuBaseline,
+      isEnrolled: true
+    }, { returning: true });
 
-    if (!created) {
-      // If profile already existed, update the vectors
-      await baselineRecord.update({
-        keystrokeBaseline,
-        gestureBaseline,
-        imuBaseline,
-        isEnrolled: true
-      });
-    }
+    console.log("✅ Successfully saved to Neon DB!");
+    console.log(`- Keystrokes Captured: ${baselineRecord.keystrokeBaseline.sequenceLength}`);
+    console.log(`- Gestures Captured: ${baselineRecord.gestureBaseline.sequenceLength}`);
+    console.log(`- IMU Vectors Captured: ${baselineRecord.imuBaseline.totalDataPoints}`);
+
+    res.status(201).json({
+      message: 'Biometric enrollment baseline successfully saved to Neon DB',
+      enrolled: true,
+      userId: user.id
+    });
 
     res.status(201).json({
       message: 'Biometric enrollment baseline successfully saved to Neon DB',
@@ -233,6 +232,35 @@ router.post('/verify-gesture', async (req, res) => {
   } catch (error) {
     console.error("Gesture Verification API Error:", error);
     res.status(500).json({ error: "Internal server error during gesture verification." });
+  }
+});
+
+// POST /api/auth/verify-imu
+router.post('/verify-imu', async (req, res) => {
+  try {
+    const { userId, imuBatch } = req.body;
+    if (!userId || !imuBatch) return res.status(400).json({ error: 'Missing data' });
+
+    const BiometricBaseline = require('../models/BiometricBaseline');
+    const baselineRecord = await BiometricBaseline.findOne({ where: { userId } });
+
+    if (!baselineRecord || !baselineRecord.imuBaseline) {
+      return res.status(404).json({ error: 'IMU baseline not found' });
+    }
+
+    // Pass to Oshani's Engine
+    const result = imuEngine.verifyMotion(baselineRecord.imuBaseline, imuBatch);
+
+    res.status(200).json({
+      verified: result.score >= 75,
+      score: result.score,
+      action: result.action,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('IMU Verification Error:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
