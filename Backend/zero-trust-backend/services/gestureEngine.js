@@ -1,55 +1,68 @@
 /**
  * Spatial Gesture Statistical Engine (Component 2 - Kalani)
- * Compares live swipe velocity and trajectory against the stored Neon DB baseline.
- * Uses variance thresholds to penalize abnormal scrolling patterns.
+ * Features Tri-State Trust Evaluation and Adaptive Baseline Updating (EMA).
  */
+const LEARNING_RATE = 0.05; // 5% incremental adaptation
+
 const evaluateGestures = (baseline, liveBatch) => {
   try {
-    // If baseline doesn't exist or is empty, fail securely.
     if (!baseline || !baseline.velocities || baseline.velocities.length === 0) {
-      return 50;
+      return { score: 50, action: "REVOKE", updatedBaseline: null };
     }
 
     const baselineVels = baseline.velocities;
     const liveVels = liveBatch.velocities;
 
-    if (!liveVels || liveVels.length === 0) return 50;
+    if (!liveVels || liveVels.length === 0) {
+      return { score: 50, action: "REVOKE", updatedBaseline: null };
+    }
 
-    // 1. Calculate Average Velocity of Baseline
+    // 1. Calculate Average Velocity
     const baselineAvgVel = baselineVels.reduce((a, b) => a + b, 0) / baselineVels.length;
-
-    // 2. Calculate Average Velocity of Live Batch
     const liveAvgVel = liveVels.reduce((a, b) => a + b, 0) / liveVels.length;
 
-    // 3. Calculate % Deviation in Swipe Speed
-    // e.g. baseline is 2.5px/ms, live is 3.0px/ms -> 0.2 deviation (20% faster)
+    // 2. Velocity Deviation
     const velocityDeviation = Math.abs(baselineAvgVel - liveAvgVel) / (baselineAvgVel || 1);
-
-    // Calculate initial score: 0 deviation = 100%.
-    // A 30% deviation (0.3) will drop the score to 70.
     let score = 100 - (velocityDeviation * 100);
 
-    // 4. Calculate Average Drag Duration to cross-verify Trajectory
+    // 3. Duration & Trajectory Penalty
     const baselineAvgDur = baseline.durations.reduce((a, b) => a + b, 0) / baseline.durations.length;
     const liveAvgDur = liveBatch.durations.reduce((a, b) => a + b, 0) / liveBatch.durations.length;
-
     const durationDeviation = Math.abs(baselineAvgDur - liveAvgDur) / (baselineAvgDur || 1);
 
-    // Heavily penalize the score if the duration deviates significantly alongside velocity
-    // (This usually indicates someone else is holding the phone at a different angle)
     if (durationDeviation > 0.4) {
       score -= 20;
     }
 
-    // Enforce hard boundaries
-    if (score > 100) score = 100;
-    if (score < 0) score = 0;
+    // Boundary constraints
+    score = Math.max(0, Math.min(100, Math.round(score)));
 
-    return Math.round(score);
+    // 4. Tri-State Action Routing
+    let action = "ALLOW";
+    let updatedBaseline = null;
+
+    if (score < 75) {
+      action = "REVOKE"; // Breaches lower bound -> Force Logout
+    } else if (score >= 75 && score < 80) {
+      action = "ADAPT"; // 5% Learning Zone -> Calibrate baseline
+
+      // Update baseline values using Exponential Moving Average (EMA)
+      updatedBaseline = {
+        velocities: baselineVels.map((v, i) =>
+          liveVels[i] ? (1 - LEARNING_RATE) * v + LEARNING_RATE * liveVels[i] : v
+        ),
+        durations: baseline.durations.map((d, i) =>
+          liveBatch.durations[i] ? Math.round((1 - LEARNING_RATE) * d + LEARNING_RATE * liveBatch.durations[i]) : d
+        ),
+        trajectories: baseline.trajectories || []
+      };
+    }
+
+    return { score, action, updatedBaseline };
 
   } catch (error) {
     console.error("Gesture Evaluation Engine Error:", error);
-    return 0; // Fail securely
+    return { score: 0, action: "REVOKE", updatedBaseline: null };
   }
 };
 
